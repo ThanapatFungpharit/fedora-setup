@@ -658,7 +658,6 @@ setup_shell() {
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME=""
 plugins=(git)
-alias ohmyzsh="nano ~/.oh-my-zsh"
 source "$ZSH/oh-my-zsh.sh"
 EOF
   fi
@@ -707,6 +706,7 @@ alias ...='cd ../..'
 alias c='clear'
 
 alias zshconfig='nano ~/.zshrc'
+alias ohmyzsh="nano ~/.oh-my-zsh"
 
 # Completions are generated once and sourced from cache on later shell starts.
 if (( $+commands[uv] )); then
