@@ -153,11 +153,13 @@ configure_dnf() {
 enable_repos() {
   local mirror="https://download1.rpmfusion.org" fedora_ver
   fedora_ver=$(rpm -E %fedora)
-  pkg_installed rpmfusion-free-release rpmfusion-nonfree-release || sudo dnf install -y \
-    "$mirror/free/fedora/rpmfusion-free-release-$fedora_ver.noarch.rpm" \
-    "$mirror/nonfree/fedora/rpmfusion-nonfree-release-$fedora_ver.noarch.rpm"
+  if ! pkg_installed rpmfusion-free-release rpmfusion-nonfree-release; then
+    sudo dnf install -y \
+      "$mirror/free/fedora/rpmfusion-free-release-$fedora_ver.noarch.rpm" \
+      "$mirror/nonfree/fedora/rpmfusion-nonfree-release-$fedora_ver.noarch.rpm" || return 1
+  fi
 
-  sudo dnf install -y dnf5-plugins 2>/dev/null || sudo dnf install -y dnf-plugins-core
+  sudo dnf install -y dnf5-plugins 2>/dev/null || sudo dnf install -y dnf-plugins-core || return 1
 
   sudo dnf install -y rpmfusion-free-release-tainted rpmfusion-nonfree-release-tainted \
     || warn "RPM Fusion tainted repos unavailable; skipping"
@@ -173,8 +175,8 @@ enable_repos() {
 }
 
 configure_flatpak() {
-  have flatpak || sudo dnf install -y flatpak
-  sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+  have flatpak || sudo dnf install -y flatpak || return 1
+  sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo || return 1
   sudo flatpak remote-modify --no-filter --enable flathub \
     || warn "Could not unfilter/enable the flathub remote"
   sudo flatpak remote-add --if-not-exists fedora oci+https://registry.fedoraproject.org \
@@ -350,7 +352,7 @@ PAPIRUS_FOLDER_COLOR="${PAPIRUS_FOLDER_COLOR:-breeze}"
 PAPIRUS_RAW=https://raw.githubusercontent.com/PapirusDevelopmentTeam
 
 setup_papirus() {
-  local icons="$HOME/.local/share/icons" scheme theme t
+  local icons="$HOME/.local/share/icons" scheme theme t marker="$HOME/.config/fedora-setup/papirus-configured"
 
   if [[ ! -d $icons/Papirus ]]; then
     mkdir -p "$icons"
@@ -360,21 +362,26 @@ setup_papirus() {
     curl_sh "$PAPIRUS_RAW/papirus-folders/master/install.sh" PREFIX="$HOME/.local" sh || return 1
   fi
   dnf_opt gtk-update-icon-cache
-  for t in Papirus Papirus-Dark Papirus-Light; do
-    papirus-folders -C "$PAPIRUS_FOLDER_COLOR" --theme "$t" || warn "papirus-folders failed for $t"
-  done
+  # Do not reset a user's folder color or icon theme on every re-run.
+  if [[ ! -f $marker ]]; then
+    for t in Papirus Papirus-Dark Papirus-Light; do
+      papirus-folders -C "$PAPIRUS_FOLDER_COLOR" --theme "$t" || warn "papirus-folders failed for $t"
+    done
 
-  # Match the icon variant to the current Plasma color scheme.
-  scheme=$(kreadconfig6 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true)
-  case ${scheme,,} in
-    *dark*)  theme=Papirus-Dark ;;
-    *light*) theme=Papirus-Light ;;
-    *)       theme=Papirus ;;
-  esac
-  /usr/libexec/plasma-changeicons "$theme" >/dev/null 2>&1 \
-    || kwriteconfig6 --file kdeglobals --group Icons --key Theme "$theme" 2>/dev/null \
-    || warn "Could not apply $theme automatically; pick it in System Settings > Colors & Themes > Icons"
-  echo "Papirus installed (folder color: $PAPIRUS_FOLDER_COLOR, icon theme: $theme)."
+    # Match the icon variant to the current Plasma color scheme.
+    scheme=$(kreadconfig6 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true)
+    case ${scheme,,} in
+      *dark*)  theme=Papirus-Dark ;;
+      *light*) theme=Papirus-Light ;;
+      *)       theme=Papirus ;;
+    esac
+    /usr/libexec/plasma-changeicons "$theme" >/dev/null 2>&1 \
+      || kwriteconfig6 --file kdeglobals --group Icons --key Theme "$theme" 2>/dev/null \
+      || warn "Could not apply $theme automatically; pick it in System Settings > Colors & Themes > Icons"
+    mkdir -p "$(dirname "$marker")"
+    : > "$marker"
+  fi
+  echo "Papirus installed; existing icon and folder preferences were preserved."
 }
 
 setup_desktop() {
@@ -460,7 +467,8 @@ install_dust() {
 }
 
 install_docker() {
-  if ! have docker; then
+  # `podman-docker` also provides a docker command, but not dockerd.
+  if ! pkg_installed docker-ce && ! pkg_installed moby-engine; then
     local repo_file
     repo_file="$(scratch_dir)/docker-ce.repo"
     fetch https://download.docker.com/linux/fedora/docker-ce.repo -o "$repo_file" || return 1
@@ -508,8 +516,16 @@ install_zen() { flatpak_app app.zen_browser.zen; }
 install_localsend() {
   flatpak_app org.localsend.localsend_app || return 1
   if firewalld_running; then
-    sudo firewall-cmd --permanent --add-port=53317/tcp --add-port=53317/udp || return 1
-    sudo firewall-cmd --reload
+    local changed=0
+    if ! sudo firewall-cmd --query-port=53317/tcp >/dev/null 2>&1; then
+      sudo firewall-cmd --permanent --add-port=53317/tcp || return 1
+      changed=1
+    fi
+    if ! sudo firewall-cmd --query-port=53317/udp >/dev/null 2>&1; then
+      sudo firewall-cmd --permanent --add-port=53317/udp || return 1
+      changed=1
+    fi
+    ((changed == 0)) || sudo firewall-cmd --reload || return 1
   fi
 }
 
@@ -586,16 +602,27 @@ OMZ_PLUGINS=(git sudo docker docker-compose fzf zsh-autosuggestions)
 # Merge OMZ_PLUGINS into the plugins=(...) line instead of replacing it, so
 # plugins you added yourself survive a re-run.
 ensure_omz_plugins() {
-  local rc=$1 cur p new=()
-  cur=$(sed -nE 's/^plugins=\((.*)\).*/\1/p' "$rc" | head -n1)
-  for p in $cur; do
-    [[ $p == zsh-syntax-highlighting ]] || new+=("$p")
-  done
-  for p in "${OMZ_PLUGINS[@]}"; do
-    [[ " ${new[*]-} " == *" $p "* ]] || new+=("$p")
-  done
-  new+=(zsh-syntax-highlighting)
-  sed -i -E "s|^plugins=\(.*\)|plugins=(${new[*]})|" "$rc"
+  local rc=$1 cur p new=() declaration
+  declaration=$(grep -nE '^plugins=\(' "$rc" | head -n1 || true)
+  if [[ -n $declaration ]]; then
+    # Only rewrite a one-line array. Never shadow a user's multiline array.
+    if ! grep -qE '^plugins=\([^)]*\)[[:space:]]*$' "$rc"; then
+      warn "Found a multiline or nonstandard plugins=(...) declaration in $rc; leaving it untouched."
+      return 0
+    fi
+    cur=$(sed -nE 's/^plugins=\(([^)]*)\)[[:space:]]*$/\1/p' "$rc" | head -n1)
+    for p in $cur; do
+      [[ $p == zsh-syntax-highlighting ]] || new+=("$p")
+    done
+    for p in "${OMZ_PLUGINS[@]}"; do
+      [[ " ${new[*]-} " == *" $p "* ]] || new+=("$p")
+    done
+    new+=(zsh-syntax-highlighting)
+    sed -i -E "s|^plugins=\([^)]*\)[[:space:]]*$|plugins=(${new[*]})|" "$rc"
+  else
+    # Add a default only when no plugins declaration exists at all.
+    sed -i '0,/^source .*oh-my-zsh\.sh/s//plugins=(git)\n&/' "$rc"
+  fi
 }
 
 setup_shell() {
@@ -638,7 +665,6 @@ EOF
 
   # Starship draws the prompt, so disable the Oh My Zsh theme.
   sed -i 's/^ZSH_THEME=.*/ZSH_THEME=""/' "$rc"
-  grep -q '^plugins=(.*)' "$rc" || sed -i '0,/^source .*oh-my-zsh\.sh/s//plugins=(git)\n&/' "$rc"
   ensure_omz_plugins "$rc"
 
   # Replace our managed block so re-runs don't duplicate it.
@@ -682,9 +708,23 @@ alias c='clear'
 
 alias zshconfig='nano ~/.zshrc'
 
-# Completions
-(( $+commands[uv]  )) && eval "$(uv generate-shell-completion zsh)"
-(( $+commands[uvx] )) && eval "$(uvx --generate-shell-completion zsh)"
+# Completions are generated once and sourced from cache on later shell starts.
+if (( $+commands[uv] )); then
+  uv_completion="$HOME/.cache/fedora-setup/uv.zsh"
+  if [[ ! -s $uv_completion ]]; then
+    mkdir -p "${uv_completion:h}"
+    uv generate-shell-completion zsh >| "$uv_completion" 2>/dev/null
+  fi
+  [[ -s $uv_completion ]] && source "$uv_completion"
+fi
+if (( $+commands[uvx] )); then
+  uvx_completion="$HOME/.cache/fedora-setup/uvx.zsh"
+  if [[ ! -s $uvx_completion ]]; then
+    mkdir -p "${uvx_completion:h}"
+    uvx --generate-shell-completion zsh >| "$uvx_completion" 2>/dev/null
+  fi
+  [[ -s $uvx_completion ]] && source "$uvx_completion"
+fi
 
 # Prompt and navigation (keep last)
 (( $+commands[zoxide]   )) && eval "$(zoxide init zsh)"
@@ -705,19 +745,24 @@ write_if_missing() {
   cat > "$1"
 }
 
+git_config_if_missing() {
+  local key=$1 value=$2
+  [[ -n $(git config --global --get "$key" 2>/dev/null || true) ]] || git config --global "$key" "$value"
+}
+
 setup_configs() {
   have git || dnf_install git
-  git config --global init.defaultBranch main
+  git_config_if_missing init.defaultBranch main
   # Only point git at delta if it exists; otherwise every `git log`/`git diff` fails.
   if have delta; then
-    git config --global core.pager delta
-    git config --global interactive.diffFilter 'delta --color-only'
-    git config --global delta.navigate true
-    git config --global delta.line-numbers true
+    git_config_if_missing core.pager delta
+    git_config_if_missing interactive.diffFilter 'delta --color-only'
+    git_config_if_missing delta.navigate true
+    git_config_if_missing delta.line-numbers true
   else
     warn "delta not installed; leaving git's pager settings alone"
   fi
-  git config --global merge.conflictstyle zdiff3
+  git_config_if_missing merge.conflictstyle zdiff3
 
   write_if_missing "$HOME/.tmux.conf" <<'EOF'
 set -g mouse on
@@ -1041,9 +1086,9 @@ setup_starship() {
 setup_sshd_firewall() {
   dnf_install openssh-server
   sudo systemctl enable --now sshd || return 1
-  if firewalld_running; then
+  if firewalld_running && ! sudo firewall-cmd --query-service=ssh >/dev/null 2>&1; then
     sudo firewall-cmd --permanent --add-service=ssh || return 1
-    sudo firewall-cmd --reload
+    sudo firewall-cmd --reload || return 1
   fi
 }
 
@@ -1160,24 +1205,27 @@ Options:
   -i, --interactive      Open the interactive component selector
   --no-tui               Run without the interactive selector
   --list                 List available components and their descriptions
-  --only NAME[,NAME...]  Run only the specified component(s); repeatable
+  --only NAME[,NAME...]  Run only the specified component(s); use 'all' for all defaults
   --skip NAME[,NAME...]  Skip component(s); repeatable
   -h, --help             Show this help
 
 When run in a terminal without --only/--skip, the selector opens by default.
-When stdin or stdout is not a terminal, all components run as before.
+When stdin or stdout is not a terminal, all default components run; sshd is opt-in.
 
 Examples:
   ./fedora-setup.sh
   ./fedora-setup.sh --no-tui
   ./fedora-setup.sh --list
   ./fedora-setup.sh --only docker
+  ./fedora-setup.sh --only all
   ./fedora-setup.sh --only docker,wezterm,zen
   ./fedora-setup.sh --skip nvidia,sshd
   ./fedora-setup.sh --only multimedia --skip nvidia
 
 Component dependencies are enabled automatically when needed (for example,
-multimedia enables RPM Fusion, and Flatpak apps enable Flatpak remotes).
+multimedia enables RPM Fusion, and NVIDIA enables Secure Boot key enrollment).
+A required dependency can be re-enabled even if it also appears in --skip.
+sshd is opt-in; enabling Docker adds your user to the root-equivalent docker group.
 EOF
 }
 
@@ -1187,7 +1235,7 @@ list_components() {
   for name in "${COMPONENTS[@]}"; do
     printf '  %-17s %s\n' "$name" "${COMPONENT_DESCRIPTION[$name]}"
   done
-  printf '\nAll components are selected by default; the TUI lets you change this before running.\n'
+  printf '\nAll default components are selected except sshd, which is opt-in; the TUI lets you change this before running.\n'
 }
 
 parse_args() {
@@ -1249,11 +1297,14 @@ resolve_selection() {
     for name in "${REQUESTED_ONLY[@]}"; do
       if [[ $name == all ]]; then
         for name in "${COMPONENTS[@]}"; do SELECTED_COMPONENTS[$name]=1; done
+        SELECTED_COMPONENTS[sshd]=0
         break
       fi
     done
   else
     for name in "${COMPONENTS[@]}"; do SELECTED_COMPONENTS[$name]=1; done
+    # Starting an SSH server is a deliberate opt-in on a workstation.
+    SELECTED_COMPONENTS[sshd]=0
   fi
 
   for name in "${REQUESTED_SKIP[@]}"; do
@@ -1264,6 +1315,11 @@ resolve_selection() {
   # Add prerequisites for components that cannot operate independently.
   if is_selected multimedia || is_selected nvidia; then
     SELECTED_COMPONENTS[rpmfusion]=1
+  fi
+  # NVIDIA on Secure Boot may require MOK enrollment; enroll_mok is a no-op
+  # when Secure Boot is disabled or the key is already enrolled.
+  if is_selected nvidia; then
+    SELECTED_COMPONENTS[mok]=1
   fi
   if is_selected zen || is_selected localsend || is_selected wezterm; then
     SELECTED_COMPONENTS[flatpak-remotes]=1
@@ -1295,7 +1351,7 @@ select_components_tui() {
   [[ -t 0 && -t 1 ]] || die "The interactive selector requires a terminal (TTY)."
 
   local total=${#COMPONENTS[@]} current=0 top=0 rows cols page_size desc_width
-  local key seq1 seq2 name desc marker pointer selected_count end_index i message=
+  local key seq1 seq2 seq3 name desc marker pointer selected_count end_index i message=
   rows=$(tput lines 2>/dev/null || printf '24')
   cols=$(tput cols 2>/dev/null || printf '80')
   [[ $rows =~ ^[0-9]+$ ]] || rows=24
@@ -1354,13 +1410,33 @@ select_components_tui() {
     case $key in
       $'\033')
         # Read a CSI arrow-key sequence without blocking on a lone Escape key.
-        if IFS= read -rsn1 -t 0.08 seq1 && [[ $seq1 == '[' ]] \
-            && IFS= read -rsn1 -t 0.08 seq2; then
-          case $seq2 in
-            A) ((current > 0)) && current=$((current - 1)) ;;
-            B) ((current < total - 1)) && current=$((current + 1)) ;;
-            H) current=0 ;;
-            F) current=$((total - 1)) ;;
+        if IFS= read -rsn1 -t 0.08 seq1; then
+          case $seq1 in
+            '[')
+              if IFS= read -rsn1 -t 0.08 seq2; then
+                case $seq2 in
+                  A) ((current > 0)) && current=$((current - 1)) ;;
+                  B) ((current < total - 1)) && current=$((current + 1)) ;;
+                  H) current=0 ;;
+                  F) current=$((total - 1)) ;;
+                  1|4)
+                    if IFS= read -rsn1 -t 0.08 seq3 && [[ $seq3 == '~' ]]; then
+                      [[ $seq2 == 1 ]] && current=0 || current=$((total - 1))
+                    fi
+                    ;;
+                esac
+              fi
+              ;;
+            O)
+              if IFS= read -rsn1 -t 0.08 seq2; then
+                case $seq2 in
+                  A) ((current > 0)) && current=$((current - 1)) ;;
+                  B) ((current < total - 1)) && current=$((current + 1)) ;;
+                  H) current=0 ;;
+                  F) current=$((total - 1)) ;;
+                esac
+              fi
+              ;;
           esac
         fi
         ;;
@@ -1380,7 +1456,7 @@ select_components_tui() {
       n|N)
         for name in "${COMPONENTS[@]}"; do SELECTED_COMPONENTS[$name]=0; done
         ;;
-      $'\r'|$'\n')
+      ''|$'\r'|$'\n')
         if ((selected_count == 0)); then
           message='Select at least one component before confirming.'
           continue
@@ -1440,7 +1516,7 @@ print_summary() {
   local reasons=() joined
   ((NV_REBOOT)) && reasons+=("the NVIDIA driver")
   is_selected zsh-setup && reasons+=("zsh as your login shell")
-  is_selected docker && reasons+=("the docker group")
+  is_selected docker && reasons+=("the docker group (equivalent to root access)")
   echo
   echo "Next steps:"
   if ((${#reasons[@]})); then
