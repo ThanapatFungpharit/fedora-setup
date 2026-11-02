@@ -512,6 +512,8 @@ firewalld_running() { have firewall-cmd && sudo firewall-cmd --state >/dev/null 
 
 install_zen() { flatpak_app app.zen_browser.zen; }
 
+install_ente_auth() { flatpak_app io.ente.auth; }
+
 # LocalSend discovers peers on 53317 (TCP and UDP), so open it with the app.
 install_localsend() {
   flatpak_app org.localsend.localsend_app || return 1
@@ -527,6 +529,19 @@ install_localsend() {
     fi
     ((changed == 0)) || sudo firewall-cmd --reload || return 1
   fi
+}
+
+install_unity_hub() {
+  sudo tee /etc/yum.repos.d/unityhub.repo >/dev/null <<'EOF'
+[unityhub]
+name=Unity Hub
+baseurl=https://hub.unity3d.com/linux/repos/rpm/stable
+enabled=1
+gpgcheck=1
+gpgkey=https://hub.unity3d.com/linux/repos/rpm/stable/repodata/repomd.xml.key
+repo_gpgcheck=1
+EOF
+  sudo dnf install -y unityhub
 }
 
 install_uv() { have uv || curl_sh https://astral.sh/uv/install.sh UV_NO_MODIFY_PATH=1 sh; }
@@ -1134,7 +1149,7 @@ COMPONENTS=(
   dnf-config upgrade rpmfusion flatpak-remotes multimedia nvidia core extra
   desktop starship claudecode worktrunk dust docker wezterm lazygit zen localsend
   uv bun zed lazydocker toolbox nerd-font zsh-setup configs starship-theme
-  sshd mok github flatpak-update
+  sshd mok github flatpak-update ente-auth unity-hub
 )
 
 declare -A COMPONENT_DESCRIPTION=(
@@ -1169,6 +1184,8 @@ declare -A COMPONENT_DESCRIPTION=(
   [mok]="Enroll the NVIDIA Secure Boot signing key when required"
   [github]="Configure GitHub CLI authentication and Git identity"
   [flatpak-update]="Update installed Flatpak applications"
+  [ente-auth]="Install Ente Auth 2FA authenticator"
+  [unity-hub]="Install Unity Hub"
 )
 
 declare -A SELECTED_COMPONENTS=()
@@ -1321,7 +1338,7 @@ resolve_selection() {
   if is_selected nvidia; then
     SELECTED_COMPONENTS[mok]=1
   fi
-  if is_selected zen || is_selected localsend || is_selected wezterm; then
+  if is_selected zen || is_selected localsend || is_selected wezterm || is_selected ente-auth; then
     SELECTED_COMPONENTS[flatpak-remotes]=1
   fi
   if is_selected starship-theme; then
@@ -1601,6 +1618,8 @@ main() {
   run_component mok "Secure Boot key enrollment (only if needed)" enroll_mok
   run_component github "Setting up GitHub CLI and Git identity" setup_github
   run_component flatpak-update "Updating Flatpak applications" update_flatpak
+  run_component ente-auth "Installing Ente Auth" install_ente_auth
+  run_component unity-hub "Installing Unity Hub" install_unity_hub
 
   print_summary
   # Non-zero exit when any best-effort component failed, so wrappers/CI can tell.
