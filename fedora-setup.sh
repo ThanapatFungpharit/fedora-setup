@@ -716,6 +716,9 @@ fi
 (( $+commands[btop] ))       && alias top='btop'
 (( $+commands[lazygit] ))    && alias lg='lazygit'
 (( $+commands[lazydocker] )) && alias lzd='lazydocker'
+cmkdir() {
+    mkdir -p -- "$1" && cd -- "$1"
+}
 alias ..='cd ..'
 alias ...='cd ../..'
 alias c='clear'
